@@ -156,7 +156,7 @@ impl RingPool {
     /// Check if ring is full
     #[inline(always)]
     pub fn is_full(&self) -> bool {
-        self.commitment_count as usize >= RING_SIZE
+        self.spent_count as usize >= MAX_SPENT_IMAGES
     }
 
     /// Check if ring is ready for withdrawal
@@ -175,7 +175,7 @@ impl RingPool {
             return Err(RdpError::PoolFull.into());
         }
 
-        let index = self.commitment_count as usize;
+        let index = (self.commitment_count as usize) % RING_SIZE;
         self.commitments[index] = *commitment;
         self.deposit_times[index] = timestamp;
         self.commitment_count += 1;
@@ -215,7 +215,7 @@ impl RingPool {
     /// Get active commitments as slice
     #[inline(always)]
     pub fn active_commitments(&self) -> &[[u8; COMMITMENT_SIZE]] {
-        &self.commitments[..self.commitment_count as usize]
+        if self.commitment_count as usize >= RING_SIZE { &self.commitments[..] } else { &self.commitments[..self.commitment_count as usize] }
     }
 }
 
