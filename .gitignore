@@ -1,0 +1,13 @@
+# Build artifacts
+target/
+
+# Node modules
+tests/node_modules/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+tests/e2e-test-data*.json

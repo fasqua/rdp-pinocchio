@@ -1,0 +1,33 @@
+[package]
+name = "rdp-pinocchio"
+version = "0.1.0"
+edition = "2021"
+description = "Ring Diffusion Protocol - Pinocchio Edition (Zero-copy, optimized CU)"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+no-entrypoint = []
+
+[dependencies]
+# Pinocchio - zero-copy Solana framework
+pinocchio = "0.7"
+pinocchio-log = "0.3"
+
+# Solana curve operations (syscalls)
+solana-curve25519 = "2.2"
+
+# Hashing
+sha2 = "0.10"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+
+[profile.release.build-override]
+opt-level = 3
