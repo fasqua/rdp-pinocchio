@@ -11,3 +11,8 @@ tests/node_modules/
 # OS
 .DS_Store
 tests/e2e-test-data*.json
+
+# Kani verification logs
+*.log
+nohup.out
+run_kani_*.sh

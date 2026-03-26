@@ -133,3 +133,49 @@ impl PendingWithdraw {
         &self.ring_pubkeys[..self.ring_size as usize]
     }
 }
+
+// ============================================================================
+// KANI PROOFS - Only compiled when running `cargo kani`
+// ============================================================================
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Proof: SIZE constant is correct
+    #[kani::proof]
+    fn proof_size_constant() {
+        assert!(PendingWithdraw::SIZE == 632);
+        assert!(core::mem::size_of::<PendingWithdraw>() == 632);
+    }
+
+    /// Proof: from_bytes rejects too-small data
+    #[kani::proof]
+    fn proof_from_bytes_bounds_check() {
+        let small_data = [0u8; 100]; // Too small
+        let result = PendingWithdraw::from_bytes(&small_data);
+        assert!(result.is_err());
+    }
+
+    /// Proof: from_bytes_mut_unchecked rejects too-small data
+    #[kani::proof]
+    fn proof_from_bytes_mut_unchecked_bounds() {
+        let mut small_data = [0u8; 100];
+        let result = PendingWithdraw::from_bytes_mut_unchecked(&mut small_data);
+        assert!(result.is_err());
+    }
+
+    /// Proof: get_ring returns correct slice length
+    #[kani::proof]
+    fn proof_get_ring_len() {
+        let mut data = [0u8; 632];
+        data[0..8].copy_from_slice(b"pending_");
+        
+        let pending = unsafe { &mut *(data.as_mut_ptr() as *mut PendingWithdraw) };
+        
+        pending.ring_size = 8;
+        assert!(pending.get_ring().len() == 8);
+        
+        pending.ring_size = 16;
+        assert!(pending.get_ring().len() == 16);
+    }
+}

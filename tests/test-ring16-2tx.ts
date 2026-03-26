@@ -20,7 +20,7 @@ import {
 import * as fs from 'fs';
 
 const PROGRAM_ID = new PublicKey('3HJBh4KFTzUjU8avv19KbezjZiekVbBtV7eraSWCyvab');
-const RING_POOL_SIZE = 8918;
+const RING_POOL_SIZE = 8920;
 const PENDING_SIZE = 632;
 
 const RDP_IX = { 

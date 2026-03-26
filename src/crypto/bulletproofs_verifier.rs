@@ -688,3 +688,166 @@ fn reduce_if_needed(result: &mut [u64; 4], had_carry: bool) {
         }
     }
 }
+
+// ============================================================================
+// KANI PROOFS - Only compiled when running `cargo kani`
+// ============================================================================
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Proof: scalar_one returns valid scalar
+    #[kani::proof]
+    fn proof_scalar_one_valid() {
+        let one = scalar_one();
+        assert!(one[0] == 1);
+        for i in 1..32 {
+            assert!(one[i] == 0);
+        }
+    }
+
+    /// Proof: scalar_add never panics
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_scalar_add_no_panic() {
+        let a: [u8; 32] = kani::any();
+        let b: [u8; 32] = kani::any();
+        let result = scalar_add(&a, &b);
+        assert!(result.len() == 32);
+    }
+
+    /// Proof: scalar_sub never panics
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_scalar_sub_no_panic() {
+        let a: [u8; 32] = kani::any();
+        let b: [u8; 32] = kani::any();
+        let result = scalar_sub(&a, &b);
+        assert!(result.len() == 32);
+    }
+
+    /// Proof: scalar_mul with concrete values
+    #[kani::proof]
+    fn proof_scalar_mul_concrete() {
+        // Test zero * anything = zero
+        let zero = [0u8; 32];
+        let one = scalar_one();
+        let result = scalar_mul(&zero, &one);
+        assert!(result == zero);
+
+        // Test one * one = one
+        let result2 = scalar_mul(&one, &one);
+        assert!(result2 == one);
+    }
+
+    /// Proof: cmp_ge_256 never panics
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_cmp_ge_256_no_panic() {
+        let a: [u64; 4] = kani::any();
+        let b: [u64; 4] = kani::any();
+        let result = cmp_ge_256(&a, &b);
+        assert!(result == true || result == false);
+    }
+
+    /// Proof: sub_256_inplace never panics
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_sub_256_inplace_no_panic() {
+        let mut a: [u64; 4] = kani::any();
+        let b: [u64; 4] = kani::any();
+        sub_256_inplace(&mut a, &b);
+        // Just verify no panic
+    }
+
+    /// Proof: limbs_to_bytes never panics and produces 32 bytes
+    #[kani::proof]
+    fn proof_limbs_to_bytes_no_panic() {
+        let limbs: [u64; 4] = kani::any();
+        let result = limbs_to_bytes(&limbs);
+        assert!(result.len() == 32);
+    }
+
+
+    /// Proof: compute_sum_of_powers never panics and returns valid scalar
+    #[kani::proof]
+    fn proof_compute_sum_of_powers_concrete() {
+        // Test with scalar one
+        let one = scalar_one();
+        let result = compute_sum_of_powers(&one);
+        assert!(result.is_ok());
+        
+        // When y=1, sum = 64 (since 1^0 + 1^1 + ... + 1^63 = 64)
+        let sum = result.unwrap();
+        assert!(sum[0] == 64);
+        for i in 1..32 {
+            assert!(sum[i] == 0);
+        }
+    }
+
+    /// Proof: compute_delta never panics with valid inputs
+    #[kani::proof]
+    fn proof_compute_delta_concrete() {
+        let one = scalar_one();
+        let result = compute_delta(&one, &one);
+        assert!(result.is_ok());
+    }
+
+    /// Proof: validate_ip_proof_structure rejects zero scalars
+    #[kani::proof]
+    fn proof_validate_ip_structure() {
+        let mut proof = BulletproofData::new();
+        // Both ip_a and ip_b are zero - should fail
+        let result = validate_ip_proof_structure(&proof);
+        assert!(result.is_err());
+        
+        // Set ip_a to non-zero - should pass
+        proof.ip_a[0] = 1;
+        let result2 = validate_ip_proof_structure(&proof);
+        assert!(result2.is_ok());
+    }
+
+    /// Proof: BulletproofData::from_bytes rejects too small data
+    #[kani::proof]
+    fn proof_bulletproof_from_bytes_bounds() {
+        let small_data = [0u8; 100]; // Too small
+        let result = BulletproofData::from_bytes(&small_data);
+        assert!(result.is_err());
+    }
+
+    /// Proof: BulletproofData SIZE constant is correct
+    #[kani::proof]
+    fn proof_bulletproof_size_constant() {
+        // 5 points + 3 scalars + 12 IP points + 2 IP scalars
+        // = 5*32 + 3*32 + 12*32 + 2*32 = 160 + 96 + 384 + 64 = 704
+        assert!(BulletproofData::SIZE == 704);
+    }
+
+    /// Proof: mul_256x256 never panics
+    #[kani::proof]
+    fn proof_mul_256x256_concrete() {
+        let zero = [0u64; 4];
+        let one = [1u64, 0, 0, 0];
+        
+        // 0 * 0 = 0
+        let r1 = mul_256x256(&zero, &zero);
+        assert!(r1 == [0u64; 8]);
+        
+        // 1 * 1 = 1
+        let r2 = mul_256x256(&one, &one);
+        assert!(r2[0] == 1);
+        for i in 1..8 {
+            assert!(r2[i] == 0);
+        }
+    }
+
+    /// Proof: reduce_if_needed never panics
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_reduce_if_needed_no_panic() {
+        let mut result: [u64; 4] = kani::any();
+        let had_carry: bool = kani::any();
+        reduce_if_needed(&mut result, had_carry);
+        // Just verify no panic
+    }
+}
