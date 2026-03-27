@@ -1,6 +1,6 @@
-//! ExecuteWithdraw instruction (TX2 of 2-TX withdraw)
+//! ExecuteWithdraw instruction (TX3 of 3-TX withdraw)
 //!
-//! Verifies ring signature using stored ring pubkeys, transfers SOL, closes PDA
+//! Verifies ring signature, applies pre-computed SMT root, transfers SOL
 
 use pinocchio::{
     account_info::AccountInfo,
@@ -11,16 +11,17 @@ use pinocchio::{
 use pinocchio_log::log;
 
 use crate::error::RdpError;
-use crate::state::{RingPool, PendingWithdraw, VAULT_SEED, PENDING_SEED};
-use crate::crypto::{verify_ring_signature, RingSignatureData, MAX_RING_SIZE};
+use crate::state::{RingPool, PendingWithdraw, VAULT_SEED, PENDING_SEED, MAX_RING_SIZE};
+use crate::crypto::{verify_ring_signature, RingSignatureData};
 
 /// Process execute withdraw instruction
 ///
 /// Layout:
 /// - signature_c: 32 bytes
-/// - responses: ring_size * 32 bytes (from pending state)
-/// - key_image: 32 bytes
+/// - responses: ring_size * 32 bytes (ring_size from pending state)
 /// - pending_bump: 1 byte
+///
+/// Key image is read from PendingWithdraw PDA (stored in TX2)
 ///
 /// Accounts:
 /// 0. `[writable]` Ring pool account
@@ -32,7 +33,6 @@ use crate::crypto::{verify_ring_signature, RingSignatureData, MAX_RING_SIZE};
 pub fn process_execute_withdraw(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
-
     data: &[u8],
 ) -> ProgramResult {
     if accounts.len() < 6 {
@@ -44,7 +44,7 @@ pub fn process_execute_withdraw(
     let destination_info = &accounts[2];
     let pending_info = &accounts[3];
     let creator_info = &accounts[4];
-    let system_program_info = &accounts[5];
+    let _system_program_info = &accounts[5];
 
     // Verify ownerships
     if ring_pool_info.owner() != program_id {
@@ -55,25 +55,30 @@ pub fn process_execute_withdraw(
     }
 
     // Read pending data
-    let (ring_size, ring_pubkeys, destination, amount, creator, ring_pool_key) = {
-        let pending_data = pending_info.try_borrow_data()?;
-        let pending = PendingWithdraw::from_bytes(&pending_data)?;
+    let pending_data = pending_info.try_borrow_data()?;
+    let pending = PendingWithdraw::from_bytes(&pending_data)?;
 
-        let rs = pending.ring_size as usize;
-        let mut ring = [[0u8; 32]; MAX_RING_SIZE];
-        for i in 0..rs {
-            ring[i] = pending.ring_pubkeys[i];
-        }
+    // Verify SMT proof was verified in TX2
+    if !pending.is_smt_verified() {
+        return Err(RdpError::InvalidInstructionData.into());
+    }
 
-        (
-            rs,
-            ring,
-            pending.destination,
-            pending.amount,
-            pending.creator,
-            pending.ring_pool,
-        )
-    };
+    let ring_size = pending.ring_size as usize;
+    let destination = pending.destination;
+    let amount = pending.amount;
+    let creator = pending.creator;
+    let ring_pool_key = pending.ring_pool;
+    let new_smt_root = pending.new_smt_root;
+    let key_image = pending.key_image;
+
+    // Copy ring_pubkeys before dropping borrow
+    let mut ring_pubkeys = [[0u8; 32]; MAX_RING_SIZE];
+    for i in 0..ring_size {
+        ring_pubkeys[i] = pending.ring_pubkeys[i];
+    }
+
+    // Drop borrow early
+    drop(pending_data);
 
     // Verify ring pool matches
     if ring_pool_info.key().as_ref() != ring_pool_key.as_slice() {
@@ -91,8 +96,8 @@ pub fn process_execute_withdraw(
     }
 
     // Parse signature data
-    // Layout: c(32) + responses(ring_size * 32) + key_image(32) + pending_bump(1)
-    let expected_len = 32 + (ring_size * 32) + 32 + 1;
+    // Layout: c(32) + responses(ring_size * 32) + pending_bump(1)
+    let expected_len = 32 + (ring_size * 32) + 1;
     if data.len() < expected_len {
         return Err(RdpError::InvalidInstructionData.into());
     }
@@ -109,10 +114,6 @@ pub fn process_execute_withdraw(
         offset += 32;
     }
 
-    let mut key_image = [0u8; 32];
-    key_image.copy_from_slice(&data[offset..offset + 32]);
-    offset += 32;
-
     let pending_bump = data[offset];
 
     // Verify pending PDA
@@ -128,15 +129,10 @@ pub fn process_execute_withdraw(
         return Err(RdpError::InvalidPDA.into());
     }
 
-    // Get vault bump and verify key image
+    // Get vault bump
     let vault_bump = {
         let pool_data = ring_pool_info.try_borrow_data()?;
         let pool = RingPool::from_bytes(&pool_data)?;
-
-        if pool.is_key_image_spent(&key_image) {
-            return Err(RdpError::KeyImageAlreadySpent.into());
-        }
-
         pool.vault_bump
     };
 
@@ -152,7 +148,7 @@ pub fn process_execute_withdraw(
         return Err(RdpError::InvalidPDA.into());
     }
 
-    // Construct message: destination (32) + amount (8) = 40 bytes
+    // Construct message
     let mut message = [0u8; 40];
     message[0..32].copy_from_slice(&destination);
     message[32..40].copy_from_slice(&amount.to_le_bytes());
@@ -168,11 +164,11 @@ pub fn process_execute_withdraw(
     // Verify ring signature
     verify_ring_signature(&message, &ring_pubkeys[..ring_size], &ring_signature)?;
 
-    // Record key image as spent
+    // Update SMT root (pre-computed in TX2)
     {
         let mut pool_data = ring_pool_info.try_borrow_mut_data()?;
         let pool = RingPool::from_bytes_mut(&mut pool_data)?;
-        pool.record_spent_key_image(&key_image)?;
+        pool.update_smt_root(&new_smt_root);
     }
 
     // Transfer SOL from vault to destination
@@ -195,7 +191,7 @@ pub fn process_execute_withdraw(
         ];
 
         let transfer_ix = pinocchio::instruction::Instruction {
-            program_id: system_program_info.key(),
+            program_id: &pinocchio::pubkey::Pubkey::default(), // System program
             accounts: &transfer_accounts,
             data: &transfer_data,
         };
@@ -214,21 +210,18 @@ pub fn process_execute_withdraw(
         )?;
     }
 
-    // Close PendingWithdraw account - transfer lamports to creator
+    // Close PendingWithdraw account
     {
         let pending_lamports = pending_info.lamports();
-        
-        // Decrease pending lamports to 0
+
         unsafe {
             *pending_info.borrow_mut_lamports_unchecked() = 0;
         }
-        
-        // Increase creator lamports
+
         unsafe {
             *creator_info.borrow_mut_lamports_unchecked() += pending_lamports;
         }
 
-        // Zero out pending data
         let mut pending_data = pending_info.try_borrow_mut_data()?;
         pending_data.fill(0);
     }

@@ -20,4 +20,3 @@ pub mod entrypoint;
 pub use error::{RdpError, RdpResult};
 pub use state::{RingPool, PendingWithdraw, RING_SIZE, COMMITMENT_SIZE, KEY_IMAGE_SIZE};
 pub use crypto::{RingSignatureData, BulletproofData, verify_ring_signature, verify_bulletproof};
-pub use instructions::RdpInstruction;

@@ -70,12 +70,12 @@ RDP breaks the on-chain link using cryptographic primitives:
 | Metric | Anchor Version | Pinocchio Version | Improvement |
 |--------|----------------|-------------------|-------------|
 | **Binary Size** | 740 KB | 169 KB | **77% smaller** |
-| **Withdraw TX** | 6 phases | 1-2 TX | **Simpler flow** |
+| **Withdraw TX** | 6 phases | 3 TX | **Simpler flow** |
 | **Dependencies** | Heavy runtime | Zero-copy | **Minimal overhead** |
 
 ### Key Improvements
 
-1. **Single/Dual TX Withdraw**: Ring size ≤8 uses single TX, ring size 16 uses only 2 TX (vs 6 phases in Anchor)
+1. **Single/Dual TX Withdraw**: Ring size ≤8 uses single TX, ring size 16 uses 3 TX (vs 6 phases in Anchor)
 2. **Zero-Copy State**: Direct memory access without serialization overhead
 3. **Optimized Crypto**: Inline scalar reduction and point operations
 
@@ -122,10 +122,10 @@ RDP breaks the on-chain link using cryptographic primitives:
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Ring Size 16 (2-TX)
+#### Ring Size 16 (3-TX)
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                      2-TX WITHDRAW (Ring 16)                           │
+│                      3-TX WITHDRAW (Ring 16)                           │
 ├────────────────────────────────────────────────────────────────────────┤
 │                                                                        │
 │  TX1: prepare_withdraw                                                 │
@@ -133,7 +133,12 @@ RDP breaks the on-chain link using cryptographic primitives:
 │  └── Store ring pubkeys (16 × 32 = 512 bytes)                          │
 │  └── Store destination + amount                                        │
 │                                                                        │
-│  TX2: execute_withdraw                                                 │
+│  TX2: upload_smt_proof                                                 │
+│  └── Upload SMT proof + key_image                                      │
+│  └── Verify against pool SMT root                                      │
+│  └── Store new_smt_root in PDA                                         │
+│                                                                        │
+│  TX3: execute_withdraw                                                 │
 │  └── Read ring from PDA                                                │
 │  └── Verify CLSAG ring signature (~1.3M CU)                            │
 │  └── Check key image not spent                                         │
@@ -162,7 +167,7 @@ RDP breaks the on-chain link using cryptographic primitives:
 | Max Ring Size | 16 |
 | Max Commitments | 16 per pool |
 | Max Spent Key Images | 256 per pool |
-| Pool Account Size | 8,920 bytes |
+| Pool Account Size | 776 bytes |
 
 ### Privacy Levels
 
@@ -170,7 +175,7 @@ RDP breaks the on-chain link using cryptographic primitives:
 |-----------|---------------|---------------|-----------------|
 | 4 | 1-in-4 | 75% | Single TX |
 | 8 | 1-in-8 | 87.5% | Single TX |
-| 16 | 1-in-16 | 93.75% | 2-TX |
+| 16 | 1-in-16 | 93.75% | 3-TX |
 
 ---
 
@@ -223,6 +228,8 @@ Commits to value `v` with blinding factor `r`. Computationally hiding and bindin
 | 2 | `withdraw` | Single-TX withdraw (ring ≤ 8) | pool, vault, destination, system |
 | 3 | `prepare_withdraw` | TX1: Store ring in PDA | pool, pending_pda, creator, system |
 | 4 | `execute_withdraw` | TX2: Verify + transfer | pool, vault, dest, pending, creator, system |
+| 5 | `upload_smt_proof` | TX2: Upload SMT proof | pool, pending_pda, creator |
+| 6 | `cancel_withdraw` | Cancel pending withdraw | pending_pda, creator |
 
 ### Instruction Data Layouts
 
@@ -283,7 +290,7 @@ solana program deploy \
 cd tests
 npm install
 
-# Ring size 16 (2-TX) test
+# Ring size 16 (3-TX) test
 npx ts-node --esm test-ring16-2tx.ts
 
 # Double-spend protection test
@@ -303,20 +310,21 @@ rdp-pinocchio/
 │   │   ├── merkle_verifier.rs      # Merkle proof verification
 │   │   └── types.rs                # Crypto data structures
 │   ├── state/
-│   │   ├── ring_pool.rs            # Main pool state (8,920 bytes)
-│   │   └── pending_withdraw.rs     # 2-TX withdraw state (632 bytes)
+│   │   ├── ring_pool.rs            # Main pool state (776 bytes)
+│   │   └── pending_withdraw.rs     # 3-TX withdraw state (696 bytes)
 │   ├── instructions/
 │   │   ├── initialize.rs           # Pool initialization
 │   │   ├── deposit.rs              # Deposit with bulletproof
 │   │   ├── withdraw.rs             # Single-TX withdraw
-│   │   ├── prepare_withdraw.rs     # TX1 of 2-TX withdraw
-│   │   └── execute_withdraw.rs     # TX2 of 2-TX withdraw
+│   │   ├── prepare_withdraw.rs     # TX1 of 3-TX withdraw
+│   │   ├── execute_withdraw.rs     # TX2 of 3-TX withdraw
+│   │   └── cancel_withdraw.rs      # Cancel pending withdraw
 │   ├── entrypoint.rs               # Program entrypoint
 │   ├── processor.rs                # Instruction router
 │   ├── error.rs                    # Error definitions
 │   └── lib.rs                      # Library exports
 ├── tests/
-│   ├── test-ring16-2tx.ts          # Ring 16 (2-TX) test
+│   ├── test-ring16-2tx.ts          # Ring 16 (3-TX) test
 │   └── test-double-spend-ring16.ts # Double-spend test (ring 16)
 └── Cargo.toml
 ```
@@ -327,7 +335,7 @@ rdp-pinocchio/
 
 | Test | Ring Size | Status | TX Hash |
 |------|-----------|--------|--------|
-| E2E 2-TX | 16 | ✅ PASS | [View](https://explorer.solana.com/tx/5HmXsTiXPVfSeaueztha5NDimWReMwFNYCRZoxjhc3dVTrE1cC2HA922dPzVb4X2zWSohHLqXeLoZrwSUhSszRRM?cluster=devnet) |
+| E2E 3-TX | 16 | ✅ PASS | [View](https://explorer.solana.com/tx/5HmXsTiXPVfSeaueztha5NDimWReMwFNYCRZoxjhc3dVTrE1cC2HA922dPzVb4X2zWSohHLqXeLoZrwSUhSszRRM?cluster=devnet) |
 | Double-spend | 16 | ✅ REJECTED | KeyImageAlreadySpent (0x1790) |
 
 ### Compute Unit Usage (Ring 16)
@@ -352,9 +360,10 @@ This project uses [Kani](https://github.com/model-checking/kani) for formal veri
 |----------|---------------|----------|
 | Scalar Arithmetic | 4/4 | 100% |
 | Bulletproofs Verifier | 13/13 | 100% |
-| Ring Pool State | 9/9 | 100% |
-| Pending Withdraw State | 4/4 | 100% |
-| **Total** | **30/30** | **100%** |
+| Ring Pool State | 10/10 | 100% |
+| Pending Withdraw State | 5/5 | 100% |
+| Sparse Merkle Tree | 5/5 | 100% |
+| **Total** | **37/37** | **100%** |
 
 ### Bugs Found & Fixed
 
@@ -362,7 +371,9 @@ This project uses [Kani](https://github.com/model-checking/kani) for formal veri
 |------|-----|-----|
 | `scalar_reduce.rs` | Array out-of-bounds: `acc[i+j]` could reach index 6 but array was `[0u128; 5]` | Changed to `[0u128; 8]` |
 | `scalar_reduce.rs` | Integer overflow in 5 locations using `+=` on u128 | Changed to `.wrapping_add()` |
-| `ring_pool.rs` | SIZE constant mismatch: calculated 8918 but actual struct size is 8920 due to alignment padding | Updated SIZE to 8920 |
+| `ring_pool.rs` | SIZE constant mismatch (v1): calculated 8918 but actual struct size is 8920 due to alignment | Updated SIZE to 8920 |
+| `ring_pool.rs` | SIZE constant mismatch (v2): struct changed, actual size is 776 bytes | Updated SIZE to 776 |
+| `ring_pool.rs` | `is_full()` always returned false | Fixed comparison to `>=` |
 
 ### Verified Properties
 
@@ -421,17 +432,26 @@ cargo kani --harness proof_scalar_add_no_panic
 - `proof_from_bytes_bounds_check`
 - `proof_from_bytes_mut_unchecked_bounds`
 - `proof_from_bytes_mut_bounds`
-- `proof_is_full_boundary`
 - `proof_is_ready_boundary`
 - `proof_add_commitment_bounds`
 - `proof_active_commitments_len`
-- `proof_spent_count_max_check`
+- `proof_update_smt_root`
+- `proof_slot_index_bounded`
+- `proof_is_full_at_capacity`
 
 **pending_withdraw.rs:**
 - `proof_size_constant`
 - `proof_from_bytes_bounds_check`
-- `proof_from_bytes_mut_unchecked_bounds`
-- `proof_get_ring_len`
+- `proof_initialize_discriminator`
+- `proof_store_smt_result_once`
+- `proof_ring_size_bounds`
+
+**sparse_merkle.rs:**
+- `proof_empty_root_deterministic`
+- `proof_smt_depth`
+- `proof_smt_proof_size`
+- `proof_leaf_index_bounded`
+- `proof_different_keys_different_positions`
 
 </details>
 
@@ -465,7 +485,7 @@ Contributions welcome. Priority areas:
 - Security review
 - CU optimization
 - Additional test coverage
-- Frontend integration
+
 
 ---
 

@@ -20,9 +20,11 @@ use crate::crypto::{
     RingSignatureData,
     POINT_SIZE,
     MAX_RING_SIZE,
+    SmtProof,
+    verify_and_insert,
 };
 
-/// Withdraw instruction data layout (matches Anchor)
+/// Withdraw instruction data layout (with SMT proof)
 ///
 /// Layout:
 /// - ring_size: 1 byte
@@ -30,6 +32,7 @@ use crate::crypto::{
 /// - signature_c: 32 bytes
 /// - signature_responses: ring_size * 32 bytes
 /// - key_image: 32 bytes
+/// - smt_proof: 644 bytes (20 * 32 siblings + 4 byte leaf_index)
 /// - amount: 8 bytes
 /// - destination: 32 bytes (for message construction, actual destination is account)
 pub struct WithdrawData {
@@ -108,6 +111,13 @@ impl WithdrawData {
             amount,
         })
     }
+
+    /// Calculate size of WithdrawData for a given ring size
+    /// Used to find offset of SMT proof in instruction data
+    pub fn size_for_ring(ring_size: usize) -> usize {
+        // ring_size(1) + ring_pubkeys(rs*32) + c(32) + responses(rs*32) + key_image(32) + amount(8)
+        1 + (ring_size * 32) + 32 + (ring_size * 32) + 32 + 8
+    }
 }
 
 /// Process withdraw instruction
@@ -140,8 +150,14 @@ pub fn process_withdraw(
     let withdraw_data = WithdrawData::from_bytes(data)?;
     let ring_size = withdraw_data.ring_size as usize;
 
-    // Read pool data and verify
-    let (denomination, vault_bump) = {
+    // Parse SMT proof from remaining data after WithdrawData
+    // Note: SMT proof is appended after the standard withdraw data
+    let smt_proof_offset = WithdrawData::size_for_ring(withdraw_data.ring_size as usize);
+    let smt_proof = SmtProof::from_bytes(&data[smt_proof_offset..])
+        .ok_or(RdpError::InvalidInstructionData)?;
+
+    // Read pool data and verify with SMT
+    let (denomination, vault_bump, new_smt_root) = {
         let pool_data = ring_pool_info.try_borrow_data()?;
         let pool = RingPool::from_bytes(&pool_data)?;
 
@@ -150,12 +166,14 @@ pub fn process_withdraw(
             return Err(RdpError::InvalidDenomination.into());
         }
 
-        // Check key image not already spent
-        if pool.is_key_image_spent(&withdraw_data.ring_signature.key_image) {
-            return Err(RdpError::KeyImageAlreadySpent.into());
-        }
+        // Verify key image not spent using SMT proof
+        let new_root = verify_and_insert(
+            pool.get_smt_root(),
+            &withdraw_data.ring_signature.key_image,
+            &smt_proof,
+        ).map_err(|_| RdpError::KeyImageAlreadySpent)?;
 
-        (pool.denomination, pool.vault_bump)
+        (pool.denomination, pool.vault_bump, new_root)
     };
 
     // Verify vault PDA
@@ -184,11 +202,11 @@ pub fn process_withdraw(
         &withdraw_data.ring_signature,
     )?;
 
-    // Record key image as spent
+    // Update SMT root (key image now spent)
     {
         let mut pool_data = ring_pool_info.try_borrow_mut_data()?;
         let pool = RingPool::from_bytes_mut(&mut pool_data)?;
-        pool.record_spent_key_image(&withdraw_data.ring_signature.key_image)?;
+        pool.update_smt_root(&new_smt_root);
     }
 
     // Transfer SOL from vault to destination

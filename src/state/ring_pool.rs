@@ -3,10 +3,11 @@
 //! Ring size: 16 (privacy 93.75%)
 //!
 //! Architecture:
-//! - RingPool account: stores commitments, key images, config (owned by program)
+//! - RingPool account: stores commitments, SMT root, config (owned by program)
 //! - Vault PDA: holds SOL deposits (owned by System Program)
 
 use crate::error::{RdpError, RdpResult};
+use crate::crypto::sparse_merkle::compute_empty_root;
 
 /// Ring size for this version
 pub const RING_SIZE: usize = 16;
@@ -17,8 +18,6 @@ pub const COMMITMENT_SIZE: usize = 32;
 /// Key image size
 pub const KEY_IMAGE_SIZE: usize = 32;
 
-/// Maximum spent key images stored
-pub const MAX_SPENT_IMAGES: usize = 256;
 
 /// Ring Pool discriminator
 pub const RING_POOL_DISCRIMINATOR: &[u8; 8] = b"ringpool";
@@ -29,7 +28,7 @@ pub const VAULT_SEED: &[u8] = b"vault";
 
 /// Ring Pool Account Layout (Zero-Copy)
 ///
-/// Total size: 8 + 32 + 8 + 1 + 2 + 2 + 1 + (16*32) + (16*8) + (256*32) + 32 = 8,920 bytes
+/// Total size: 8 + 32 + 8 + 1 + 2 + 8 + 1 + (16*32) + (16*8) + 32 + 32 = 728 bytes
 #[repr(C)]
 pub struct RingPool {
     /// Discriminator "ringpool"
@@ -47,8 +46,8 @@ pub struct RingPool {
     /// Current number of commitments in ring (0-16)
     pub commitment_count: u16,
 
-    /// Number of spent key images
-    pub spent_count: u16,
+    /// Number of spent key images (unlimited with SMT)
+    pub spent_count: u64,
 
     /// Vault bump seed
     pub vault_bump: u8,
@@ -59,8 +58,8 @@ pub struct RingPool {
     /// Deposit timestamps (Unix timestamp)
     pub deposit_times: [u64; RING_SIZE],
 
-    /// Spent key images (for double-spend prevention)
-    pub spent_key_images: [[u8; KEY_IMAGE_SIZE]; MAX_SPENT_IMAGES],
+    /// Sparse Merkle Tree root for spent key images (unlimited withdrawals)
+    pub smt_root: [u8; 32],
 
     /// Merkle root of all commitments
     pub merkle_root: [u8; 32],
@@ -68,11 +67,10 @@ pub struct RingPool {
 
 impl RingPool {
     /// Account size in bytes
-    pub const SIZE: usize = 8 + 32 + 8 + 1 + 1 + 2 + 2 + 1 + 1 + // +2 padding
-        (RING_SIZE * COMMITMENT_SIZE) +
-        (RING_SIZE * 8) +
-        (MAX_SPENT_IMAGES * KEY_IMAGE_SIZE) +
-        32;
+    /// Layout: discriminator(8) + authority(32) + denomination(8) + pool_bump(1) + 
+    /// commitment_count(2) + spent_count(8) + vault_bump(1) + padding(4) +
+    /// commitments(16*32=512) + deposit_times(16*8=128) + smt_root(32) + merkle_root(32) = 768 bytes
+    pub const SIZE: usize = 776;
 
     /// Zero-copy read from account data
     #[inline(always)]
@@ -147,16 +145,16 @@ impl RingPool {
         pool.vault_bump = vault_bump;
         pool.commitments = [[0u8; COMMITMENT_SIZE]; RING_SIZE];
         pool.deposit_times = [0u64; RING_SIZE];
-        pool.spent_key_images = [[0u8; KEY_IMAGE_SIZE]; MAX_SPENT_IMAGES];
+        pool.smt_root = compute_empty_root(); // Initialize empty SMT
         pool.merkle_root = [0u8; 32];
 
         Ok(())
     }
 
-    /// Check if ring is full
+    /// Check if pool is full (SMT is never full - unlimited withdrawals)
     #[inline(always)]
     pub fn is_full(&self) -> bool {
-        self.spent_count as usize >= MAX_SPENT_IMAGES
+        self.commitment_count >= RING_SIZE as u16
     }
 
     /// Check if ring is ready for withdrawal
@@ -183,33 +181,17 @@ impl RingPool {
         Ok(index)
     }
 
-    /// Check if key image is already spent
-    pub fn is_key_image_spent(&self, key_image: &[u8; KEY_IMAGE_SIZE]) -> bool {
-        for i in 0..self.spent_count as usize {
-            if &self.spent_key_images[i] == key_image {
-                return true;
-            }
-        }
-        false
+    /// Get SMT root for external verification
+    #[inline(always)]
+    pub fn get_smt_root(&self) -> &[u8; 32] {
+        &self.smt_root
     }
 
-    /// Record spent key image
-    pub fn record_spent_key_image(
-        &mut self,
-        key_image: &[u8; KEY_IMAGE_SIZE],
-    ) -> RdpResult<()> {
-        if self.is_key_image_spent(key_image) {
-            return Err(RdpError::KeyImageAlreadySpent.into());
-        }
-
-        if self.spent_count as usize >= MAX_SPENT_IMAGES {
-            return Err(RdpError::PoolFull.into());
-        }
-
-        self.spent_key_images[self.spent_count as usize] = *key_image;
+    /// Update SMT root after successful withdrawal verification
+    /// The verification is done externally using verify_and_insert
+    pub fn update_smt_root(&mut self, new_root: &[u8; 32]) {
+        self.smt_root = *new_root;
         self.spent_count += 1;
-
-        Ok(())
     }
 
     /// Get active commitments as slice
@@ -229,8 +211,8 @@ mod kani_proofs {
     /// Proof: SIZE constant is correct
     #[kani::proof]
     fn proof_size_constant() {
-        assert!(core::mem::size_of::<RingPool>() == 8920);
-        assert!(RingPool::SIZE == 8920); // includes alignment padding
+        assert!(core::mem::size_of::<RingPool>() == 776);
+        assert!(RingPool::SIZE == 776);
     }
 
     /// Proof: from_bytes rejects too-small data
@@ -257,28 +239,11 @@ mod kani_proofs {
         assert!(result.is_err());
     }
 
-    /// Proof: is_full correct at boundary
-    #[kani::proof]
-    fn proof_is_full_boundary() {
-        let mut data = [0u8; 8920];
-        data[0..8].copy_from_slice(b"ringpool");
-        
-        let pool = unsafe { &mut *(data.as_mut_ptr() as *mut RingPool) };
-        
-        pool.commitment_count = 15;
-        assert!(!pool.is_full());
-        
-        pool.commitment_count = 16;
-        assert!(pool.is_full());
-        
-        pool.commitment_count = 17;
-        assert!(pool.is_full());
-    }
 
     /// Proof: is_ready correct at boundary
     #[kani::proof]
     fn proof_is_ready_boundary() {
-        let mut data = [0u8; 8920];
+        let mut data = [0u8; 776];
         data[0..8].copy_from_slice(b"ringpool");
         
         let pool = unsafe { &mut *(data.as_mut_ptr() as *mut RingPool) };
@@ -293,7 +258,7 @@ mod kani_proofs {
     /// Proof: add_commitment bounds check
     #[kani::proof]
     fn proof_add_commitment_bounds() {
-        let mut data = [0u8; 8920];
+        let mut data = [0u8; 776];
         data[0..8].copy_from_slice(b"ringpool");
         
         let pool = unsafe { &mut *(data.as_mut_ptr() as *mut RingPool) };
@@ -307,7 +272,7 @@ mod kani_proofs {
     /// Proof: active_commitments returns correct slice length
     #[kani::proof]
     fn proof_active_commitments_len() {
-        let mut data = [0u8; 8920];
+        let mut data = [0u8; 776];
         data[0..8].copy_from_slice(b"ringpool");
         
         let pool = unsafe { &mut *(data.as_mut_ptr() as *mut RingPool) };
@@ -319,16 +284,47 @@ mod kani_proofs {
         assert!(pool.active_commitments().len() == 0);
     }
 
-    /// Proof: spent_count check prevents overflow
+    /// Proof: update_smt_root increments spent_count
     #[kani::proof]
-    fn proof_spent_count_max_check() {
-        let mut data = [0u8; 8920];
+    fn proof_update_smt_root() {
+        let mut data = [0u8; 776];
         data[0..8].copy_from_slice(b"ringpool");
-        
+
         let pool = unsafe { &mut *(data.as_mut_ptr() as *mut RingPool) };
-        pool.spent_count = 256; // At max
+        pool.spent_count = 0;
+
+        let new_root = [1u8; 32];
+        pool.update_smt_root(&new_root);
+
+        assert!(pool.spent_count == 1);
+        assert!(pool.smt_root == new_root);
+    }
+
+    /// Proof: slot index is always within bounds  
+    #[kani::proof]
+    fn proof_slot_index_bounded() {
+        let count: u16 = kani::any();
+        kani::assume(count < 1000);
         
-        // Direct check of the bounds condition
-        assert!(pool.spent_count as usize >= MAX_SPENT_IMAGES);
+        let index = (count as usize) % RING_SIZE;
+        assert!(index < RING_SIZE);
+    }
+
+    /// Proof: is_full returns true when commitment_count >= RING_SIZE
+    #[kani::proof]
+    fn proof_is_full_at_capacity() {
+        let mut data = [0u8; 776];
+        data[0..8].copy_from_slice(b"ringpool");
+
+        let pool = unsafe { &mut *(data.as_mut_ptr() as *mut RingPool) };
+        
+        pool.commitment_count = 16;
+        assert!(pool.is_full());
+        
+        pool.commitment_count = 17;
+        assert!(pool.is_full());
+        
+        pool.commitment_count = 15;
+        assert!(!pool.is_full());
     }
 }

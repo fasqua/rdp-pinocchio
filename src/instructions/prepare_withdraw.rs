@@ -1,4 +1,4 @@
-//! PrepareWithdraw instruction (TX1 of 2-TX withdraw)
+//! PrepareWithdraw instruction (TX1 of 3-TX withdraw)
 //!
 //! Creates a PendingWithdraw PDA account containing ring pubkeys
 
@@ -59,7 +59,7 @@ pub fn process_prepare_withdraw(
     }
 
     let ring_size = data[0] as usize;
-    
+
     if ring_size < 2 || ring_size > 16 {
         return Err(RdpError::RingSizeTooSmall.into());
     }
@@ -123,7 +123,7 @@ pub fn process_prepare_withdraw(
 
     // Create account instruction data
     let mut create_account_data = [0u8; 52];
-    create_account_data[0..4].copy_from_slice(&0u32.to_le_bytes()); // CreateAccount instruction
+    create_account_data[0..4].copy_from_slice(&0u32.to_le_bytes());
     create_account_data[4..12].copy_from_slice(&lamports.to_le_bytes());
     create_account_data[12..20].copy_from_slice(&space.to_le_bytes());
     create_account_data[20..52].copy_from_slice(program_id.as_ref());
@@ -147,7 +147,6 @@ pub fn process_prepare_withdraw(
         data: &create_account_data,
     };
 
-    // Create signer seeds for PDA
     let seeds: [pinocchio::instruction::Seed; 4] = [
         pinocchio::instruction::Seed::from(PENDING_SEED),
         pinocchio::instruction::Seed::from(ring_pool_info.key().as_ref()),
@@ -162,7 +161,7 @@ pub fn process_prepare_withdraw(
         &[pda_signer],
     )?;
 
-    // Initialize PendingWithdraw data
+    // Initialize PendingWithdraw data (without SMT proof)
     {
         let mut pending_data = pending_info.try_borrow_mut_data()?;
         PendingWithdraw::initialize(

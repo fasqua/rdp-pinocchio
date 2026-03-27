@@ -70,6 +70,10 @@ pub enum RdpError {
     MissingAccount = 6051,
     /// Arithmetic overflow
     ArithmeticOverflow = 6052,
+    /// Account not writable
+    AccountNotWritable = 6053,
+    /// Invalid creator (not owner of PDA)
+    InvalidCreator = 6054,
 }
 
 impl From<RdpError> for ProgramError {
